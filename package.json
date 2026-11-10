@@ -1,13 +1,13 @@
 {
   "name": "openslimedit",
-  "version": "1.0.4",
-  "description": "OpenCode plugin that reduces token usage by up to 33% — compresses tool descriptions, compacts read output, adds line-range edit support",
+  "version": "1.1.0",
+  "description": "OpenCode plugin (1.x and 2.x) that reduces token usage - compresses tool descriptions, compacts read output, adds line-range edit support",
   "type": "module",
   "license": "MIT",
   "author": "ASidorenkoCode",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ASidorenkoCode/openslimedit.git"
+    "url": "https://github.com/ephb/openslimedit.git"
   },
   "homepage": "https://github.com/ASidorenkoCode/openslimedit",
   "bugs": {
@@ -21,7 +21,9 @@
     "code-editing",
     "ai"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test test/core.test.ts"
+  },
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts"

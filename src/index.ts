@@ -1,93 +1,101 @@
-import type { Plugin } from "@opencode-ai/plugin"
-import * as fs from "fs"
-import * as path from "path"
-const LINE_RANGE_RE = /^(\d+)(?:\s*-\s*(\d+))?$/
+// OpenSlimedit entry point for both OpenCode plugin APIs.
+//
+// The default export carries both contracts:
+//   server(input)  - OpenCode 1.x. The 1.x loader reads `id` and `server` and ignores `setup`.
+//   setup(ctx)     - OpenCode 2.x. The 2.x loader requires `id` and `setup`.
+//
+// Every hook is fail-open: on any error the original tool behavior is kept.
+import { SLIM, compactEditOutput, compactReadOutput, expandLineRange } from "./core.ts"
 
-export const OpenSlimeditPlugin: Plugin = async ({ directory }) => {
-  function resolvePath(filePath: string): string {
-    if (path.isAbsolute(filePath)) return path.normalize(filePath)
-    return path.resolve(directory, filePath)
-  }
+const ID = "openslimedit"
 
+function disabled(): boolean {
+  return process.env.OPENSLIMEDIT_DISABLED === "1"
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode 1.x
+// ---------------------------------------------------------------------------
+async function server({ directory }: { directory: string }) {
+  if (disabled()) return {}
   return {
-    // Shorten tool descriptions + strip parameter descriptions
+    // Shorten built-in tool descriptions
     "tool.definition": async (input: any, output: any) => {
-      const SLIM: Record<string, string> = {
-        read: "Read file content.",
-        edit: "Edit file. oldString can be line range '55-64'.",
-        apply_patch: "Apply a patch to files.",
-        write: "Write file.",
-        bash: "Run shell command.",
-        glob: "Find files.",
-        grep: "Search in files.",
-        list: "List directory.",
-        fetch: "Fetch URL.",
-      }
-      if (SLIM[input.toolID]) {
-        output.description = SLIM[input.toolID]
-      }
+      try {
+        if (SLIM[input.toolID]) output.description = SLIM[input.toolID]
+      } catch {}
     },
 
-    // Compact tool output: shorten read paths, strip footer, compress edit results
-    "tool.execute.after": async (input, output) => {
-      // Compress edit output
-      if (input.tool === "edit") {
-        if (output.output.startsWith("Edit applied successfully.")) {
-          output.output = "OK"
-        }
-        return
-      }
-
-      if (input.tool !== "read") return
-      if (output.output.includes("<type>directory</type>")) return
-
-      const pathMatch = output.output.match(/<path>(.+?)<\/path>/)
-      if (!pathMatch) return
-
-      // Shorten to relative path
-      const absPath = path.normalize(pathMatch[1])
-      const relPath = path.relative(directory, absPath)
-      output.output = output.output.replace(
-        `<path>${pathMatch[1]}</path>`,
-        `<path>${relPath}</path>`,
-      )
-
-      // Remove type tag and footer
-      output.output = output.output.replace("<type>file</type>\n", "")
-      output.output = output.output.replace(
-        /\n\n\(End of file - total \d+ lines\)\n/,
-        "\n",
-      )
+    // Compact read and edit output
+    "tool.execute.after": async (input: any, output: any) => {
+      try {
+        if (typeof output?.output !== "string") return
+        if (input.tool === "edit") output.output = compactEditOutput(output.output)
+        else if (input.tool === "read") output.output = compactReadOutput(output.output, directory)
+      } catch {}
     },
 
     // Expand line ranges in oldString
-    "tool.execute.before": async (input, output) => {
-      if (input.tool !== "edit") return
-      const args = output.args
-      if (!args.oldString || !args.filePath) return
-
-      const filePath = resolvePath(args.filePath)
-      let content: string
+    "tool.execute.before": async (input: any, output: any) => {
       try {
-        content = fs.readFileSync(filePath, "utf-8")
-      } catch {
-        return
-      }
-
-      if (content.includes(args.oldString)) return
-
-      const match = args.oldString.trim().match(LINE_RANGE_RE)
-      if (!match) return
-
-      const lines = content.split("\n")
-      const startLine = parseInt(match[1], 10)
-      const endLine = match[2] ? parseInt(match[2], 10) : startLine
-
-      if (startLine >= 1 && endLine <= lines.length && startLine <= endLine) {
-        args.oldString = lines.slice(startLine - 1, endLine).join("\n")
-      }
+        if (input.tool === "edit") expandLineRange(output.args, directory)
+      } catch {}
     },
-  } as any
+  }
 }
 
-export default OpenSlimeditPlugin
+// ---------------------------------------------------------------------------
+// OpenCode 2.x
+// ---------------------------------------------------------------------------
+async function setup(ctx: any) {
+  if (disabled()) return
+  const directory: string = ctx?.location?.directory || process.cwd()
+
+  // Shorten tool descriptions sent to the model
+  await ctx.session.hook("context", (event: any) => {
+    try {
+      for (const [name, description] of Object.entries(SLIM)) {
+        const tool = event.tools?.[name]
+        if (tool) tool.description = description
+      }
+    } catch {}
+  })
+
+  // Expand line ranges in oldString
+  await ctx.tool.hook("execute.before", (event: any) => {
+    try {
+      if (event.tool === "edit") event.input = expandLineRange(event.input, directory)
+    } catch {}
+  })
+
+  // Compact read and edit output. Result text is either a string or the
+  // first text part of a content array.
+  await ctx.tool.hook("execute.after", (event: any) => {
+    try {
+      if (event.status !== "completed") return
+      if (event.tool !== "edit" && event.tool !== "read") return
+      const result = event.result
+      if (!result || result.content == null) return
+
+      const transform = (text: string) =>
+        event.tool === "edit" ? compactEditOutput(text) : compactReadOutput(text, directory)
+
+      if (typeof result.content === "string") {
+        const next = transform(result.content)
+        if (next !== result.content) event.result = { ...result, content: next }
+        return
+      }
+      if (Array.isArray(result.content)) {
+        const i = result.content.findIndex((p: any) => p?.type === "text" && typeof p.text === "string")
+        if (i < 0) return
+        const next = transform(result.content[i].text)
+        if (next === result.content[i].text) return
+        const content = [...result.content]
+        content[i] = { ...content[i], text: next }
+        event.result = { ...result, content }
+      }
+    } catch {}
+  })
+}
+
+export default { id: ID, server, setup }

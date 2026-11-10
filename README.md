@@ -2,6 +2,8 @@
 
 An [OpenCode](https://github.com/anomalyco/opencode) plugin that reduces token usage by up to 45% with zero configuration. It compresses tool descriptions, compacts read output, and adds line-range edit support.
 
+> **Fork note (ephb/openslimedit):** this fork works on both OpenCode 1.x and 2.x from a single entry point, and keeps LSP diagnostics visible after edits. See [Changes in this fork](#changes-in-this-fork).
+
 ---
 
 ## Token Savings at a Glance
@@ -46,14 +48,43 @@ No custom tools. No system prompt injection. No modifications to built-in tool b
 
 Add to your OpenCode config:
 
+OpenCode 1.x (`plugin` key):
+
 ```jsonc
-// .opencode/opencode.jsonc
 {
-    "plugin": ["openslimedit@latest"]
+    "plugin": ["openslimedit@git+https://github.com/ephb/openslimedit.git"]
 }
 ```
 
-Using `@latest` ensures you always get the newest version automatically when OpenCode starts.
+OpenCode 2.x (`plugins` key):
+
+```jsonc
+{
+    "plugins": ["openslimedit@git+https://github.com/ephb/openslimedit.git"]
+}
+```
+
+A local checkout also works: `"file:///absolute/path/to/openslimedit/src/index.ts"`.
+
+Set `OPENSLIMEDIT_DISABLED=1` to turn the plugin off without editing the config.
+
+---
+
+## Changes in this fork
+
+- **One entry for OpenCode 1.x and 2.x.** The default export is `{ id, server, setup }`. The 1.x loader only reads `id` and `server()` (verified against the 1.18.33 loader source); the 2.x loader uses `setup(ctx)`.
+
+| Feature | 1.x hook | 2.x hook |
+|---|---|---|
+| Short tool descriptions | `tool.definition` | `ctx.session.hook("context")` |
+| Line-range edits (`"55-64"`) | `tool.execute.before` (`filePath`) | `ctx.tool.hook("execute.before")` (`path`) |
+| Compact read/edit output | `tool.execute.after` | `ctx.tool.hook("execute.after")` |
+
+- **2.x tool names and formats:** `shell`, `patch`, `webfetch`; read header `Read file <path>, lines a-b` is made relative; `Edited <path> (N replacements)` becomes `OK`.
+- **LSP diagnostics are kept (1.x).** Upstream replaced the whole edit result with `OK`, which also removed the "LSP errors detected in this file" block. Now only the success sentence is shortened.
+- **Better short descriptions:** `read` mentions images, PDFs and offset/limit (upstream issue #1); `bash`/`shell` keep the hint to prefer the dedicated file tools.
+- Paths outside the project directory stay absolute instead of becoming `../../..` chains.
+- Tests: `npm test` (Node 22.6+, uses `--experimental-strip-types`).
 
 Restart OpenCode. The plugin will automatically start optimizing your sessions.
 
@@ -353,11 +384,14 @@ Minimax shows consistent savings (11-19%) at all file sizes. GPT 5.3 Codex shows
 
 ```
 openslimedit/
-├── src/
-│   └── index.ts      # Plugin implementation (single file)
-├── package.json
-├── LICENSE
-└── README.md
+  src/
+    core.ts         # Version independent logic
+    index.ts        # Entry point for OpenCode 1.x (server) and 2.x (setup)
+  test/
+    core.test.ts
+  package.json
+  LICENSE
+  README.md
 ```
 
 ---
